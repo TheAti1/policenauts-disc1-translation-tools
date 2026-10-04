@@ -1,131 +1,50 @@
-﻿# Policenauts Disc 1 Translation Build Tools
+# Policenauts Disc 1 Translation Tools
 
-A small Python toolkit for rebuilding a patched **Policenauts Disc 1** PlayStation BIN/CUE image from a private text-only translation JSON.
+Python tools for auditing text and rebuilding a fixed-layout PlayStation Disc 1 BIN/CUE from a privately owned English-patched image. This repository contains **code only**, not game data or a script dump.
 
-This repository is intended for ROM-hacking research and fan-translation workflows. It contains tools only.
+## What Is Covered
 
-## What This Repo Does
+- Existing `GAME1.DPK` / `GAME2.DPK` `.SZ` entries, with negated-byte encoding and in-band control opcodes preserved.
+- Voiced `jXS` text in `PN_VOX1.PAC`, including special dash and CO2 styling bytes missed by a plain ASCII scanner.
+- ASCII menu labels in `BIN.DPK/MENU.BIN`.
+- Existing and reviewed new ASCII subtitles inside `MOVIE/*.MOV`.
+- DPK CRC-32/BZIP2, Mode2/Form1 EDC/ECC, source-byte checks, and output-byte checks.
+- A separate verifier for changed sectors, DPK checksums, and movie timing headers.
 
-- Reads a private master metadata JSON that describes where text lives in a compatible Disc 1 image.
-- Reads a plain text-only translation JSON list edited by the translator.
-- Fits each translation back into the original fixed-size text space.
-- Preserves known in-band game text control opcodes.
-- Re-encodes game text that uses negated-byte character storage.
-- Patches regular game text, JXS/voiced subtitle text, and movie subtitle text.
-- Rebuilds DPK CRC-32/BZIP2 checksums for touched `GAME1.DPK` / `GAME2.DPK` entries.
-- Recalculates PlayStation Mode2/Form1 EDC/ECC for changed sectors.
-- Verifies that every patched entry appears in the output image at the expected byte location.
+Text is still written **in place**. The tool does not expand pointers or install a Turkish font. By default, a translation that does not fit causes the build to stop; it is **not** silently truncated. Turkish-specific glyphs are transliterated to ASCII until a font patch exists.
 
-## What This Repo Does Not Include
+## Files
 
-This repository does **not** include:
+| File | Purpose |
+| --- | --- |
+| `extract_policenauts_audited.py` | Extend an existing private catalog with menu, voiced, and approved movie text. |
+| `audit_policenauts_game.py` | Compare source `.SZ` strings against a private catalog. |
+| `audit_policenauts_movies.py` | Report possible missing movie subtitles for human review. |
+| `build_policenauts_tr_bin.py` | Rebuild BIN/CUE without shifting source file extents. |
+| `verify_policenauts_image.py` | Independently check the patched image. |
+| `policenauts_disc_tools.py` | ISO, DPK, sector, EDC/ECC helpers. |
+| `policenauts_text_format.py` | Text layout and negated-byte encoding helpers. |
+| `docs/USAGE.md` | Complete command-line walkthrough. |
 
-- Game BIN/CUE, ISO, IMG, or any other disc image.
-- Original or patched game data.
-- Extracted full game script text.
-- A translation dump.
-- Font assets or copyrighted images.
-- Konami code or assets.
-- The English patch itself.
+## Private Inputs
 
-You must provide your own legally obtained disc image and your own private metadata/translation JSON files.
+Supply your own source BIN/CUE and private JSON files. The audited extractor takes:
 
-## Repository Layout
+- An English-patched Disc 1 BIN.
+- A base master JSON containing `entries` with source offsets and original byte spans.
+- A same-length text-only edit JSON array.
+- A private overrides JSON containing translations for newly discovered text and approval for candidate movie subtitles.
 
-```text
-build_policenauts_tr_bin.py      Main build script
-policenauts_text_format.py       Text fitting and game text encoding helpers
-policenauts_disc_tools.py        PSX Mode2/Form1 EDC/ECC and DPK checksum helpers
-docs/USAGE.md                    Step-by-step usage guide
-examples/                        Tiny fake examples, not real game data
-iso_extract/NAUTS/.gitkeep       Placeholder for private GAME1.DPK/GAME2.DPK files
-```
+Keep game images, extracted text, translations, and reports outside the repository. `.gitignore` excludes common disc images and JSON dumps, but check `git status` before publishing.
 
-## Required Private Files
+See [the usage guide](docs/USAGE.md) for commands and the overrides format.
 
-Place these files next to the scripts before building:
+## Verification and Limits
 
-```text
-Policenauts (Japan) (Disc 1) [En by Slowbeef v1.0].bin
-Policenauts (Japan) (Disc 1) [En by Slowbeef v1.0].cue
-policenauts_texts_complete_rebuilt_all.json
-policenauts_texts_tr_edit_with_movies_text_only_fit_truncated_complete.json
-iso_extract/NAUTS/GAME1.DPK
-iso_extract/NAUTS/GAME2.DPK
-```
+A successful build requires zero fitted-text cuts and zero byte mismatches. Run `verify_policenauts_image.py` afterwards; it rejects changed non-Mode2/Form1 sectors, bad EDC/ECC, bad DPK checksums, and changed timing-header bytes.
 
-The JSON files and DPK files are intentionally ignored by git because they are derived from game data.
-
-## Quick Start
-
-```powershell
-python -m json.tool ".\policenauts_texts_tr_edit_with_movies_text_only_fit_truncated_complete.json" > $null
-python ".\build_policenauts_tr_bin.py"
-```
-
-The default output is:
-
-```text
-Policenauts (Japan) (Disc 1) [TR Custom].bin
-Policenauts (Japan) (Disc 1) [TR Custom].cue
-policenauts_tr_custom_build_report.json
-policenauts_tr_custom_truncation_report.json
-```
-
-Open the generated `.cue` file in your emulator, not the `.bin` directly.
-
-## Custom Output Names
-
-```powershell
-python ".\build_policenauts_tr_bin.py" `
-  --edit ".\policenauts_texts_tr_edit_with_movies_text_only_fit_truncated_complete.json" `
-  --out-bin ".\Policenauts_Disc1_TR_Test.bin" `
-  --out-cue ".\Policenauts_Disc1_TR_Test.cue" `
-  --report ".\Policenauts_Disc1_TR_Test_report.json" `
-  --cuts ".\Policenauts_Disc1_TR_Test_cuts.json"
-```
-
-## Expected Report Fields
-
-A successful build prints a JSON report. The most important field is:
-
-```json
-"exact_byte_mismatches": 0
-```
-
-For the tested private Disc 1 workflow, a successful build also reported:
-
-```text
-entry_count: 16251
-game_sz: 12995
-jxs_voice: 2977
-movie_ascii: 279
-dpk_crc_updates: 33
-fixed_edc_sectors: 1215
-fixed_ecc_sectors: 1215
-```
-
-Your numbers may differ if your metadata differs, but `exact_byte_mismatches` must be `0`.
-
-## Character Encoding Note
-
-This tool does not patch the game font. For the current ASCII-only font workflow, Turkish characters are converted to safe ASCII equivalents, for example:
-
-```text
-ş -> s
-ğ -> g
-ı -> i
-ö -> o
-ü -> u
-ç -> c
-```
-
-If you add a real font hack later, update `policenauts_text_format.py` accordingly.
-
-## Legal / Preservation Note
-
-This project is provided for educational ROM-hacking research. Use it only with disc images and extracted files you are legally allowed to modify. Do not distribute copyrighted game data, full script dumps, patched ISOs/BINs, or translation dumps without permission.
+These structural checks do **not** prove that every visible word has been extracted or that every subtitle looks correct in an emulator. Text baked into images, uncertain compressed-video candidates, and runtime display timing still require playtesting. Do not claim a crash-free or complete translation based on a build report alone.
 
 ## License
 
-Tool code is released under the MIT License. This license applies only to the code in this repository, not to any game data or third-party assets.
+The tool code is MIT-licensed. The license does not cover the game, the English patch, or user-supplied translations.

@@ -198,54 +198,86 @@ def parse_dpk_records_from_file(path: Path) -> tuple[int, int, list[dict[str, An
     return count, rec_size, records
 
 
-def update_dpk_checksums_for_patched_game_entries(
-    fp, results: list[dict[str, Any]]
-) -> tuple[int, set[int]]:
-    """Update FRID/DPK CRC-32/BZIP2 checksums for touched GAME*.SZ records."""
-    touched_by_container: dict[str, set[int]] = {}
-    base_by_container: dict[str, int] = {}
-    records_by_container: dict[str, list[dict[str, Any]]] = {}
+def _iso_records(fp, extent: int, size: int) -> dict[str, tuple[int, int]]:
+    data = read_user_bytes_from_raw(fp, extent * SECTOR_USER, size)
+    out: dict[str, tuple[int, int]] = {}
+    pos = 0
+    while pos < len(data):
+        length = data[pos]
+        if not length:
+            pos = ((pos // SECTOR_USER) + 1) * SECTOR_USER
+            continue
+        rec = data[pos : pos + length]
+        if len(rec) < 34:
+            raise ValueError("Invalid ISO directory record")
+        name = rec[33 : 33 + rec[32]].decode("ascii", errors="ignore").split(";")[0]
+        if name and name not in ("\x00", "\x01"):
+            out[name] = (struct.unpack_from("<I", rec, 2)[0], struct.unpack_from("<I", rec, 10)[0])
+        pos += length
+    return out
 
+
+def iso_nauts_files(fp) -> dict[str, tuple[int, int]]:
+    pvd = read_user_bytes_from_raw(fp, 16 * SECTOR_USER, SECTOR_USER)
+    if pvd[1:6] != b"CD001":
+        raise ValueError("Source image has no ISO9660 primary volume descriptor")
+    root = pvd[156:190]
+    root_files = _iso_records(fp, struct.unpack_from("<I", root, 2)[0], struct.unpack_from("<I", root, 10)[0])
+    if "NAUTS" not in root_files:
+        raise ValueError("NAUTS directory not found")
+    return _iso_records(fp, *root_files["NAUTS"])
+
+
+def dpk_records_from_image(fp, base_user: int) -> list[dict[str, Any]]:
+    header = read_user_bytes_from_raw(fp, base_user, 0x20)
+    if header[:4] != b"FRID":
+        raise ValueError("FRID/DPK header not found")
+    count = struct.unpack_from("<I", header, 0x0C)[0]
+    record_size = struct.unpack_from("<I", header, 0x14)[0]
+    if count > 10000 or record_size < 24 or record_size > 256:
+        raise ValueError("Invalid FRID/DPK table size")
+    table = read_user_bytes_from_raw(fp, base_user + 0x20, count * record_size)
+    records = []
+    for index in range(count):
+        offset = index * record_size
+        rec = table[offset : offset + record_size]
+        records.append({
+            "index": index,
+            "name": rec[:12].split(b"\0", 1)[0].decode("ascii", errors="strict"),
+            "record_offset": 0x20 + offset,
+            "data_offset": struct.unpack_from("<I", rec, 12)[0],
+            "data_size": struct.unpack_from("<I", rec, 16)[0],
+            "checksum": struct.unpack_from("<I", rec, 20)[0],
+        })
+    return records
+
+
+def update_dpk_checksums_for_patched_entries(fp, results: list[dict[str, Any]]) -> tuple[int, set[int]]:
+    """Update checksums using DPK tables read directly from the current image."""
+    files = iso_nauts_files(fp)
+    touched: dict[str, set[int]] = {}
     for item in results:
-        if item.get("source") != "game_sz":
-            continue
-        if item.get("status") not in {"patchable", "patchable_opcode_aware"}:
-            continue
-        container = item.get("container")
-        entry_index = item.get("container_entry_index")
-        if not container or entry_index is None:
-            continue
-        container = str(container)
-        entry_index = int(entry_index)
-        if container not in records_by_container:
-            dpk_path = Path("iso_extract") / "NAUTS" / container
-            _count, _rec_size, records = parse_dpk_records_from_file(dpk_path)
-            records_by_container[container] = records
-        records = records_by_container[container]
-        if entry_index < 0 or entry_index >= len(records):
-            continue
-        if container not in base_by_container:
-            rec = records[entry_index]
-            base_by_container[container] = (
-                int(item["user_offset"]) - int(rec["data_offset"]) - int(item["local_offset"])
-            )
-        touched_by_container.setdefault(container, set()).add(entry_index)
+        name = str(item["container"])
+        if name not in files:
+            raise ValueError(f"DPK container not present in ISO: {name}")
+        touched.setdefault(name, set()).add(int(item["container_entry_index"]))
 
     updated = 0
-    touched_sectors: set[int] = set()
-    for container, indices in sorted(touched_by_container.items()):
-        records = records_by_container[container]
-        base_user = base_by_container[container]
-        for entry_index in sorted(indices):
-            rec = records[entry_index]
-            data_user_off = base_user + int(rec["data_offset"])
-            data_size = int(rec["data_size"])
-            new_crc = compute_crc32_bzip2(read_user_bytes_from_raw(fp, data_user_off, data_size))
-            checksum_user_off = base_user + int(rec["record_offset"]) + 20
-            old_crc = struct.unpack("<I", read_user_bytes_from_raw(fp, checksum_user_off, 4))[0]
-            if old_crc == new_crc:
-                continue
-            touched_sectors.update(write_user_bytes_to_raw(fp, checksum_user_off, struct.pack("<I", new_crc)))
-            updated += 1
-
-    return updated, touched_sectors
+    sectors: set[int] = set()
+    for name, indices in touched.items():
+        extent, file_size = files[name]
+        base_user = extent * SECTOR_USER
+        records = dpk_records_from_image(fp, base_user)
+        for index in sorted(indices):
+            if index >= len(records):
+                raise ValueError(f"Invalid {name} entry index: {index}")
+            rec = records[index]
+            if rec["data_offset"] + rec["data_size"] > file_size:
+                raise ValueError(f"Invalid {name} entry bounds: {index}")
+            data_user = base_user + rec["data_offset"]
+            checksum_user = base_user + rec["record_offset"] + 20
+            actual = compute_crc32_bzip2(read_user_bytes_from_raw(fp, data_user, rec["data_size"]))
+            if actual != rec["checksum"]:
+                sectors.update(write_user_bytes_to_raw(fp, checksum_user, struct.pack("<I", actual)))
+                updated += 1
+    return updated, sectors

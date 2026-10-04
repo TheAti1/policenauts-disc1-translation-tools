@@ -11,6 +11,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import mmap
+import os
+import re
 import shutil
 from collections import Counter
 from pathlib import Path
@@ -21,16 +24,16 @@ from policenauts_disc_tools import (
     SECTOR_RAW,
     SECTOR_USER,
     fix_mode2_form1_edc_ecc_for_sectors,
-    update_dpk_checksums_for_patched_game_entries,
+    update_dpk_checksums_for_patched_entries,
     write_user_bytes_to_raw,
 )
 
 DEFAULT_SOURCE_BIN = Path("Policenauts (Japan) (Disc 1) [En by Slowbeef v1.0].bin")
 DEFAULT_SOURCE_CUE = Path("Policenauts (Japan) (Disc 1) [En by Slowbeef v1.0].cue")
-DEFAULT_MASTER = Path("policenauts_texts_complete_rebuilt_all.json")
-DEFAULT_EDIT = Path("policenauts_texts_tr_edit_with_movies_text_only_fit_truncated_complete.json")
-DEFAULT_OUT_BIN = Path("Policenauts (Japan) (Disc 1) [TR Custom].bin")
-DEFAULT_OUT_CUE = Path("Policenauts (Japan) (Disc 1) [TR Custom].cue")
+DEFAULT_MASTER = Path("policenauts_texts_master_audited.json")
+DEFAULT_EDIT = Path("policenauts_texts_tr_edit_audited.json")
+DEFAULT_OUT_BIN = Path("Policenauts (Japan) (Disc 1) [TR Audited].bin")
+DEFAULT_OUT_CUE = Path("Policenauts (Japan) (Disc 1) [TR Audited].cue")
 DEFAULT_REPORT = Path("policenauts_tr_custom_build_report.json")
 DEFAULT_CUTS = Path("policenauts_tr_custom_truncation_report.json")
 
@@ -60,7 +63,20 @@ def load_edit(edit_path: Path, expected_count: int) -> list[str]:
             f"Text count mismatch: {edit_path} has {len(payload)} strings, "
             f"but the master metadata has {expected_count} entries"
         )
-    return [str(item) for item in payload]
+    if any(not isinstance(item, str) for item in payload):
+        raise RuntimeError("Every translation entry must be a JSON string")
+    return payload
+
+
+def movie_prefix(entry: dict[str, Any]) -> bytes:
+    raw = bytes.fromhex(str(entry["old_bytes_hex"])).replace(b"\x80|", b"\n")
+    display = str(entry["text_with_breaks"]).encode("ascii", errors="ignore")
+    # Some subtitles have source leading-byte guards consumed by the renderer.
+    # Preserve their occupied width instead of dropping the first visible glyph.
+    core = raw.rstrip(b" ")
+    if core.endswith(display) and 0 < len(core) - len(display) <= 3:
+        return b" " * (len(core) - len(display))
+    return b""
 
 
 def fit_one(entry: dict[str, Any], translated: str) -> tuple[str, str, bool]:
@@ -83,12 +99,24 @@ def fit_one(entry: dict[str, Any], translated: str) -> tuple[str, str, bool]:
 
     if source == "movie_ascii":
         markers = ["\n"] * original.count("\n")
+        capacity = int(entry["old_byte_len"]) - len(movie_prefix(entry))
         command_text, was_truncated = textfmt.fit_layout(
             translated,
             original,
             markers,
-            int(entry["old_byte_len"]),
+            capacity,
             lambda value: value.replace("\n", "\x80|").encode("latin1"),
+        )
+        return command_text, command_text, was_truncated
+
+    if source == "bin_ascii":
+        source_formats = re.findall(r"%[-+0-9.]*[A-Za-z]", original)
+        translated_formats = re.findall(r"%[-+0-9.]*[A-Za-z]", translated)
+        if source_formats != translated_formats:
+            raise RuntimeError(f"Printf placeholders changed: {original!r} -> {translated!r}")
+        command_text, was_truncated = textfmt.fit_layout(
+            translated, original, [], int(entry["old_byte_len"]),
+            lambda value: value.encode("ascii"),
         )
         return command_text, command_text, was_truncated
 
@@ -142,6 +170,33 @@ def raw_sectors_for_raw_write(raw_offset: int, byte_count: int) -> set[int]:
     return set(range(first, last + 1))
 
 
+def verify_source(source_bin: Path, entries: list[dict[str, Any]]) -> None:
+    """Reject metadata from a different disc before modifying a single byte."""
+    with source_bin.open("rb") as stream, mmap.mmap(stream.fileno(), 0, access=mmap.ACCESS_READ) as raw:
+        for entry in entries:
+            expected = bytes.fromhex(str(entry["old_bytes_hex"]))
+            source = str(entry["source"])
+            if source == "jxs_voice":
+                offset = int(entry["raw_offset"])
+                actual = raw[offset : offset + len(expected)]
+                inner = offset % SECTOR_RAW
+                if inner < 24 or inner + len(expected) + 1 > 24 + SECTOR_USER:
+                    raise RuntimeError(f"JXS text crosses sector user data: index {entry['index']}")
+            else:
+                offset = int(entry["user_offset"])
+                actual = bytearray()
+                remaining = len(expected)
+                while remaining:
+                    sector, inner = divmod(offset, SECTOR_USER)
+                    count = min(remaining, SECTOR_USER - inner)
+                    raw_offset = sector * SECTOR_RAW + 24 + inner
+                    actual.extend(raw[raw_offset : raw_offset + count])
+                    offset += count
+                    remaining -= count
+            if actual != expected:
+                raise RuntimeError(f"Source bytes mismatch at entry {entry['index']} ({source})")
+
+
 def patch_bin(entries: list[dict[str, Any]], source_bin: Path, out_bin: Path) -> dict[str, Any]:
     shutil.copyfile(source_bin, out_bin)
     touched_sectors: set[int] = set()
@@ -174,9 +229,18 @@ def patch_bin(entries: list[dict[str, Any]], source_bin: Path, out_bin: Path) ->
                     }
                 )
             elif source == "movie_ascii":
-                encoded = fitted.replace("\n", "\x80|").encode("latin1")
+                encoded = movie_prefix(entry) + fitted.replace("\n", "\x80|").encode("latin1")
                 blob = encoded + b"\0" + (b"\0" * (old_span - len(encoded)))
                 touched_sectors.update(write_user_bytes_to_raw(target, int(entry["user_offset"]), blob))
+            elif source == "bin_ascii":
+                encoded = fitted.encode("ascii")
+                blob = encoded + b"\0" + (b"\0" * (old_span - len(encoded)))
+                touched_sectors.update(write_user_bytes_to_raw(target, int(entry["user_offset"]), blob))
+                game_results.append({
+                    "source": "bin_ascii",
+                    "container": entry["container"],
+                    "container_entry_index": entry["container_entry_index"],
+                })
             else:
                 encoded = fitted.encode("ascii")
                 blob = encoded + b"\0" + (b"\0" * (old_span - len(encoded)))
@@ -187,7 +251,7 @@ def patch_bin(entries: list[dict[str, Any]], source_bin: Path, out_bin: Path) ->
 
             patched[source] += 1
 
-        crc_updates, crc_sectors = update_dpk_checksums_for_patched_game_entries(
+        crc_updates, crc_sectors = update_dpk_checksums_for_patched_entries(
             target, game_results
         )
         touched_sectors.update(crc_sectors)
@@ -240,7 +304,10 @@ def verify_exact_bytes(out_bin: Path, entries: list[dict[str, Any]]) -> list[dic
             )
             actual = read_user(int(entry["user_offset"]), len(expected))
         elif source == "movie_ascii":
-            expected = fitted.replace("\n", "\x80|").encode("latin1") + b"\0"
+            expected = movie_prefix(entry) + fitted.replace("\n", "\x80|").encode("latin1") + b"\0"
+            actual = read_user(int(entry["user_offset"]), len(expected))
+        elif source == "bin_ascii":
+            expected = fitted.encode("ascii") + b"\0"
             actual = read_user(int(entry["user_offset"]), len(expected))
         else:
             expected = fitted.encode("ascii") + b"\0"
@@ -271,11 +338,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--out-cue", type=Path, default=DEFAULT_OUT_CUE)
     parser.add_argument("--report", type=Path, default=DEFAULT_REPORT)
     parser.add_argument("--cuts", type=Path, default=DEFAULT_CUTS)
+    parser.add_argument("--allow-truncate", action="store_true", help="Explicitly allow strings to be cut to fit")
     return parser
 
 
 def main() -> int:
     args = build_parser().parse_args()
+    if args.source_bin.resolve() == args.out_bin.resolve():
+        raise RuntimeError("Output BIN must not overwrite the English source BIN")
+    if args.source_cue.resolve() == args.out_cue.resolve():
+        raise RuntimeError("Output CUE must not overwrite the English source CUE")
     required = [args.source_bin, args.source_cue, args.master, args.edit]
     missing = [str(path) for path in required if not path.exists()]
     if missing:
@@ -284,13 +356,21 @@ def main() -> int:
     entries = load_entries(args.master)
     edits = load_edit(args.edit, len(entries))
     prepared, stats, cuts = prepare_entries(entries, edits)
+    if cuts and not args.allow_truncate:
+        write_json(args.cuts, cuts)
+        raise RuntimeError(f"{len(cuts)} translations do not fit. Shorten them or pass --allow-truncate.")
 
-    patch_report = patch_bin(prepared, args.source_bin, args.out_bin)
-    write_cue(args.source_cue, args.out_cue, args.out_bin)
-    mismatches = verify_exact_bytes(args.out_bin, prepared)
+    verify_source(args.source_bin, prepared)
+
+    partial_bin = args.out_bin.with_name(args.out_bin.name + ".partial")
+    patch_report = patch_bin(prepared, args.source_bin, partial_bin)
+    mismatches = verify_exact_bytes(partial_bin, prepared)
     if mismatches:
         write_json(args.report.with_suffix(".mismatches.json"), mismatches[:200])
         raise RuntimeError(f"Exact byte verification failed: {len(mismatches)} mismatches")
+
+    os.replace(partial_bin, args.out_bin)
+    write_cue(args.source_cue, args.out_cue, args.out_bin)
 
     write_json(args.cuts, cuts)
     report = {

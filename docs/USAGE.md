@@ -1,99 +1,95 @@
-﻿# Usage Guide
+# Disc 1 Audit and Build Guide
 
-This guide explains the private file workflow for rebuilding a translated Disc 1 image.
+This guide uses PowerShell and keeps private game data in a sibling directory. Adjust the paths if your directories differ. Python 3.10+ is recommended.
 
-## 1. Prepare The Folder
-
-Clone or download this repository, then put your private files next to the scripts:
-
-```text
-Policenauts (Japan) (Disc 1) [En by Slowbeef v1.0].bin
-Policenauts (Japan) (Disc 1) [En by Slowbeef v1.0].cue
-policenauts_texts_complete_rebuilt_all.json
-policenauts_texts_tr_edit_with_movies_text_only_fit_truncated_complete.json
-iso_extract/NAUTS/GAME1.DPK
-iso_extract/NAUTS/GAME2.DPK
-```
-
-Do not commit those files. `.gitignore` is set up to keep them out of git.
-
-## 2. Edit The Translation JSON
-
-Only edit this file:
-
-```text
-policenauts_texts_tr_edit_with_movies_text_only_fit_truncated_complete.json
-```
-
-It is a plain JSON array. Do not reorder it. Do not remove entries. Do not add entries.
-
-## 3. Validate JSON Syntax
-
-PowerShell:
+## 1. Set Paths
 
 ```powershell
-python -m json.tool ".\policenauts_texts_tr_edit_with_movies_text_only_fit_truncated_complete.json" > $null
+$game = 'D:\Policenauts-TR\Policenauts (Japan) (Disc 1)'
+$tools = 'D:\Policenauts-TR\policenauts-disc1-translation-tools'
+Set-Location -LiteralPath $game
+$source = Join-Path $game 'Policenauts (Japan) (Disc 1) [En by Slowbeef v1.0].bin'
+$sourceCue = Join-Path $game 'Policenauts (Japan) (Disc 1) [En by Slowbeef v1.0].cue'
+$master = Join-Path $game 'policenauts_texts_master_audited.json'
+$edit = Join-Path $game 'policenauts_texts_tr_edit_audited.json'
 ```
 
-If the command prints no error, the JSON syntax is valid.
+You also need a private *base* master/edit pair with matching entry counts. This audit tool extends that pair; it does not reconstruct every existing translation from nothing. Keep the original English BIN unchanged.
 
-## 4. Build The Patched Image
+## 2. Review Newly Found Text
 
 ```powershell
-python ".\build_policenauts_tr_bin.py"
+py "$tools\audit_policenauts_game.py" --source-bin $source `
+  --master (Join-Path $game 'policenauts_texts_complete_rebuilt_all.json') `
+  --report (Join-Path $game 'policenauts_game_audit_report.json')
+
+py "$tools\audit_policenauts_movies.py" --source-bin $source `
+  --master (Join-Path $game 'policenauts_texts_complete_rebuilt_all.json') `
+  --report (Join-Path $game 'policenauts_movie_audit_report.json')
 ```
 
-Default outputs:
+These reports may contain compressed-video false positives. Do not automatically patch every candidate. The audited extractor adds movie candidates only when they have an exact translation entry in the private overrides file.
 
-```text
-Policenauts (Japan) (Disc 1) [TR Custom].bin
-Policenauts (Japan) (Disc 1) [TR Custom].cue
-policenauts_tr_custom_build_report.json
-policenauts_tr_custom_truncation_report.json
+## 3. Prepare Private Overrides
+
+Create `policenauts_audit_overrides.json` in the game directory, **not** in the repository. Use this shape:
+
+```json
+{
+  "menu": {"Original UI label": "Translated UI label"},
+  "voice": {"Original voiced line": "Translated voiced line"},
+  "movie": {"Original subtitle": "Translated subtitle"},
+  "movie_source_cleanup": {"Raw subtitle with guard bytes": "Clean subtitle"},
+  "existing": {"Existing original line": "Corrected translation"},
+  "intentionally_unchanged": []
+}
 ```
 
-## 5. Read The Build Report
+For voice/movie keys, line breaks and repeated whitespace are collapsed to one space when looking up translations. Menu strings are matched exactly first because leading spaces can be meaningful. Approve movie candidates one by one after reviewing their report and source bytes.
+
+## 4. Generate the Audited Catalog
 
 ```powershell
-python -c "import json, pathlib; r=json.loads(pathlib.Path('policenauts_tr_custom_build_report.json').read_text(encoding='utf-8')); print('Entry count:', r['entry_count']); print('Sources:', r['counts_by_source']); print('Byte mismatches:', r['exact_byte_mismatches']); print('DPK CRC updates:', r['patch_report']['dpk_crc_updates']); print('EDC sectors:', r['patch_report']['fixed_edc_sectors']); print('ECC sectors:', r['patch_report']['fixed_ecc_sectors']); print('SHA256:', r['out_bin_sha256'])"
+py "$tools\extract_policenauts_audited.py" `
+  --source-bin $source `
+  --base-master (Join-Path $game 'policenauts_texts_complete_rebuilt_all.json') `
+  --base-edit (Join-Path $game 'policenauts_texts_tr_edit_with_movies_text_only_fit_truncated_complete.json') `
+  --overrides (Join-Path $game 'policenauts_audit_overrides.json') `
+  --out-master $master --out-edit $edit `
+  --report (Join-Path $game 'policenauts_texts_audit_report.json')
 ```
 
-The key line must be:
+The master stores source offsets and original bytes. **Only translate the text-only `$edit` JSON array.** Do not add, delete, or reorder elements. Re-running the extractor preserves edits from an existing `$master`/`$edit` pair only when original offsets and byte spans still match. Keep a separate backup before large translation revisions.
 
-```text
-Byte mismatches: 0
-```
-
-## 6. Check Truncated Lines
-
-Long translations are fitted into fixed-size original slots. If a line is too long, the tool truncates it from the end and logs it.
+## 5. Build Without Silent Truncation
 
 ```powershell
-python -c "import json, pathlib; cuts=json.loads(pathlib.Path('policenauts_tr_custom_truncation_report.json').read_text(encoding='utf-8')); print('Truncated entries:', len(cuts)); [print('\nIndex:', x['index'], '\nSource:', x['source'], '\nOriginal:', x['original'], '\nFitted:', x['fitted']) for x in cuts[:30]]"
+py -m json.tool $edit > $null
+py "$tools\build_policenauts_tr_bin.py" `
+  --source-bin $source --source-cue $sourceCue `
+  --master $master --edit $edit `
+  --out-bin (Join-Path $game 'Policenauts (Japan) (Disc 1) [TR Audited].bin') `
+  --out-cue (Join-Path $game 'Policenauts (Japan) (Disc 1) [TR Audited].cue') `
+  --report (Join-Path $game 'policenauts_tr_audited_build_report.json') `
+  --cuts (Join-Path $game 'policenauts_tr_audited_cuts.json')
 ```
 
-If a line is cut badly, shorten that same index in the text-only JSON and build again.
+If a translation does not fit, the build stops and writes the cuts report. Shorten those translations and rerun. Avoid `--allow-truncate`; it intentionally discards words. Do not assume a shorter byte count guarantees good line wrapping: review the rendered game too.
 
-## 7. Emulator Note
+## 6. Independently Verify the Image
 
-Open the generated CUE file:
-
-```text
-Policenauts (Japan) (Disc 1) [TR Custom].cue
+```powershell
+py "$tools\verify_policenauts_image.py" `
+  --source-bin $source `
+  --patched-bin (Join-Path $game 'Policenauts (Japan) (Disc 1) [TR Audited].bin') `
+  --master $master
 ```
 
-Do not open an old CUE that still points at another BIN.
+Expect successful exit and nonzero verified sector/DPK/timing counts. Open the **new CUE**, not an old CUE or the BIN directly, in your emulator. Play through menu, dialogue, voice and movie scenes. Static checks cannot guarantee that every image-based label is translated or that runtime subtitle timing and wrapping are correct.
 
-## 8. Troubleshooting
+## 7. Troubleshooting
 
-### Text count mismatch
-
-The text-only JSON list has a different number of strings than the master metadata. Restore the original list length.
-
-### Exact byte verification failed
-
-The output is not safe. Do not use the generated BIN. Inspect the generated `.mismatches.json` file.
-
-### Read Error 4097
-
-Usually caused by a bad CUE/BIN pair, stale emulator cache, or damaged sector/checksum data. This tool updates DPK CRCs and Mode2/Form1 EDC/ECC for touched sectors, so also make sure the emulator is loading the newly generated CUE.
+- `Source bytes mismatch`: metadata does not match this exact English BIN; do not force it.
+- `Text count mismatch`: your text-only edit list and master are out of sync.
+- `Read Error 4097`: confirm the emulator loaded the new CUE, check the verifier, and keep both files in the same directory. A passing verifier narrows the problem but does not replace gameplay testing.
+- Text still English: inspect the audit report, then determine whether it lives in menu ASCII, `.SZ`, `jXS`, movie ASCII, or an image/font asset before patching.
