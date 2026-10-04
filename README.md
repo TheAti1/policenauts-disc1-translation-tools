@@ -24,7 +24,8 @@ Text is still written **in place**. The tool does not expand pointers or install
 | `verify_policenauts_image.py` | Independently check the patched image. |
 | `policenauts_disc_tools.py` | ISO, DPK, sector, EDC/ECC helpers. |
 | `policenauts_text_format.py` | Text layout and negated-byte encoding helpers. |
-| `rex_plugin/policenauts_disc1.py` | Optional REX plugin for the ordered text-only JSON. |
+| `make_policenauts_rex_json.py` | Create a fresh English-source REX JSON with empty translation fields. |
+| `rex_plugin/policenauts_disc1.py` | REX plugin for the structured JSON (legacy arrays also work). |
 | `docs/USAGE.md` | Complete command-line walkthrough. |
 
 ## Private Inputs
@@ -40,9 +41,11 @@ Keep game images, extracted text, translations, and reports outside the reposito
 
 See [the usage guide](docs/USAGE.md) for commands and the overrides format.
 
-## Optional REX Plugin
+## Fresh REX Translation
 
-Copy `rex_plugin/policenauts_disc1.py` into REX's `Eklentiler` directory. Select the audited text-only edit JSON as input and keep the audited master JSON beside it. The plugin reads **English source text from the master**, not the current Turkish values; REX writes a separate `TR_`-prefixed text-only JSON. It shows actual source line breaks as `|` to the model and restores them to JSON newlines on output. Missing optional breaks or placeholders never cause the plugin to discard an answer. The disc builder still checks fixed fields such as menu `printf` placeholders and available byte capacity.
+Use `make_policenauts_rex_json.py` to create a private English-source document from the audited master. Every entry has a stable `id`, `index`, `kind`, English `source`, and initially null `translation`; the root records the format and total count. No previous Turkish edits are copied into it. Copy `rex_plugin/policenauts_disc1.py` into REX's `Eklentiler` directory, then select the English document. The plugin sends only `source` to the model and writes answers only to `translation`. REX's `TR_`-prefixed output can be passed **directly** to the builder as `--edit`. Keep the audited master JSON beside it.
+
+Actual source line breaks are shown to the model as `|` and restored to newlines on output. Missing optional breaks or placeholders never cause the plugin to discard an answer. The builder refuses incomplete structured files, changed IDs/source text, changed fixed menu `printf` placeholders, and translations that do not fit. The old plain-array edit format remains supported.
 
 ## Verification and Limits
 

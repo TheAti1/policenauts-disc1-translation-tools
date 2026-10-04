@@ -1,8 +1,7 @@
-"""REX plugin for the private Policenauts Disc 1 text-only translation JSON.
+"""REX plugin for ordered Policenauts English-source translation JSON.
 
-Select policenauts_texts_tr_edit_audited.json in REX. Its sibling
-policenauts_texts_master_audited.json supplies the original English text.
-The output remains a plain JSON array, in the same order as the input.
+The preferred input is policenauts_rex_english.json, generated from the private
+master catalog. The legacy plain-array edit JSON remains supported.
 """
 
 import json
@@ -28,7 +27,13 @@ TRANSLATION_PROMPT = (
 TERM_PROMPT = ""
 
 MASTER_FILENAME = "policenauts_texts_master_audited.json"
-VALID_SOURCES = {"game_sz", "jxs_voice", "movie_ascii", "bin_ascii"}
+FORMAT = "policenauts-rex-v1"
+KIND_BY_SOURCE = {
+    "bin_ascii": "menu",
+    "game_sz": "dialogue",
+    "jxs_voice": "voiced_dialogue",
+    "movie_ascii": "movie_subtitle",
+}
 
 
 def get_file_encoding(filepath):
@@ -37,9 +42,33 @@ def get_file_encoding(filepath):
 
 def _load_edit(content):
     data = json.loads(content)
-    if not isinstance(data, list) or not all(isinstance(item, str) for item in data):
-        raise ValueError("Policenauts metin dosyası yalnızca string içeren JSON dizisi olmalı")
-    return data
+    if isinstance(data, list):
+        if not all(isinstance(item, str) for item in data):
+            raise ValueError("Eski Policenauts JSON dizisi yalnızca string içermeli")
+        return data, "legacy"
+    if not isinstance(data, dict) or data.get("format") != FORMAT:
+        raise ValueError(f"{FORMAT} biçimi veya eski string dizisi bekleniyor")
+    if set(data) != {"format", "count", "source_language", "target_language", "entries"}:
+        raise ValueError("REX JSON üst alanları geçersiz")
+    entries = data.get("entries")
+    if (not isinstance(entries, list)
+            or type(data.get("count")) is not int
+            or data["count"] != len(entries)
+            or data.get("source_language") != "en"
+            or data.get("target_language") != "tr"):
+        raise ValueError("REX JSON başlığı veya toplam metin sayısı geçersiz")
+    for index, row in enumerate(entries):
+        if (not isinstance(row, dict)
+                or set(row) != {"id", "index", "kind", "source", "translation"}
+                or row.get("id") != _key(index)
+                or type(row.get("index")) is not int
+                or row["index"] != index
+                or row.get("kind") not in KIND_BY_SOURCE.values()
+                or not isinstance(row.get("source"), str)
+                or (row["translation"] is not None
+                    and not isinstance(row["translation"], str))):
+            raise ValueError(f"REX metin kaydı veya alanları geçersiz: {index}")
+    return data, "structured"
 
 
 def _load_master(filepath, count):
@@ -53,7 +82,7 @@ def _load_master(filepath, count):
     for index, entry in enumerate(entries):
         if (not isinstance(entry, dict)
                 or entry.get("index") != index
-                or entry.get("source") not in VALID_SOURCES
+                or entry.get("source") not in KIND_BY_SOURCE
                 or not isinstance(entry.get("text_with_breaks"), str)):
             raise ValueError(f"Geçersiz master metin kaydı: {index}")
     return entries
@@ -68,13 +97,21 @@ def _show(text):
 
 
 def extract_translatable_texts(content, filepath, extraction_context=None):
-    data = _load_edit(content)
-    entries = _load_master(filepath, len(data))
+    data, mode = _load_edit(content)
+    rows = data if mode == "legacy" else data["entries"]
+    entries = _load_master(filepath, len(rows))
     result = {}
     for index, entry in enumerate(entries):
-        source = entry["text_with_breaks"]
+        if mode == "structured":
+            row = rows[index]
+            if (row["source"] != entry["text_with_breaks"]
+                    or row["kind"] != KIND_BY_SOURCE[entry["source"]]):
+                raise ValueError(f"REX kaynağı master katalogla eşleşmiyor: {index}")
+            source = row["source"]
+        else:
+            source = entry["text_with_breaks"]
         if source.strip():
-            result[_key(index)] = (_show(source), {"source": entry["source"]})
+            result[_key(index)] = (_show(source), {"kind": KIND_BY_SOURCE[entry["source"]]})
     return result
 
 
@@ -85,15 +122,20 @@ def _restore(answer):
 
 
 def rebuild_content_with_translations(original_content, original_texts, translated_texts):
-    data = _load_edit(original_content)
-    for index in range(len(data)):
+    data, mode = _load_edit(original_content)
+    rows = data if mode == "legacy" else data["entries"]
+    for index in range(len(rows)):
         key = _key(index)
         answer = translated_texts.get(key)
         if not isinstance(answer, str) or not answer.strip():
             continue
-        # Unchanged model output should not replace an existing Turkish edit
-        # with the English source. Optional breaks/placeholders are not required.
-        if answer == original_texts.get(key):
-            continue
-        data[index] = _restore(answer)
+        if mode == "structured":
+            if answer == original_texts.get(key) and rows[index]["translation"] is not None:
+                continue
+            rows[index]["translation"] = _restore(answer)
+        else:
+            # Preserve existing Turkish edits when the model merely echoes English.
+            if answer == original_texts.get(key):
+                continue
+            rows[index] = _restore(answer)
     return json.dumps(data, ensure_ascii=False, indent=2) + "\n"

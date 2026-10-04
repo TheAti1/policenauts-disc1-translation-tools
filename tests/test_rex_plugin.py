@@ -3,6 +3,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from build_policenauts_tr_bin import load_edit
+from make_policenauts_rex_json import make_document
 from rex_plugin import policenauts_disc1 as plugin
 
 
@@ -51,6 +53,58 @@ class RexPluginTests(unittest.TestCase):
         self.master.write_text(json.dumps({"entries": []}), encoding="utf-8")
         with self.assertRaisesRegex(ValueError, "metin sayısı"):
             plugin.extract_translatable_texts(self.edit.read_text(encoding="utf-8"), self.edit)
+
+    def test_structured_json_writes_only_translation_fields(self):
+        master = json.loads(self.master.read_text(encoding="utf-8"))
+        document = make_document(master)
+        self.assertEqual(document["count"], 4)
+        self.assertTrue(all(row["translation"] is None for row in document["entries"]))
+        content = json.dumps(document)
+        source = self.folder / "policenauts_rex_english.json"
+        source.write_text(content, encoding="utf-8")
+        texts = plugin.extract_translatable_texts(content, source)
+        self.assertEqual(texts["p00000"][0], "First|line")
+        originals = {key: item[0] for key, item in texts.items()}
+        answers = {"p00000": "Bir|iki", "p00001": "Diski tak", "p00002": "Again"}
+        rebuilt = json.loads(plugin.rebuild_content_with_translations(content, originals, answers))
+        self.assertEqual(rebuilt["count"], 4)
+        self.assertEqual(rebuilt["entries"][0]["source"], "First\nline")
+        self.assertEqual(rebuilt["entries"][0]["translation"], "Bir\niki")
+        self.assertEqual(rebuilt["entries"][1]["translation"], "Diski tak")
+        self.assertEqual(rebuilt["entries"][2]["translation"], "Again")
+        self.assertIsNone(rebuilt["entries"][3]["translation"])
+
+    def test_builder_rejects_incomplete_or_reordered_structured_json(self):
+        master = json.loads(self.master.read_text(encoding="utf-8"))
+        rows = master["entries"]
+        document = make_document(master)
+        source = self.folder / "policenauts_rex_english.json"
+        source.write_text(json.dumps(document), encoding="utf-8")
+        with self.assertRaisesRegex(RuntimeError, "untranslated entries"):
+            load_edit(source, rows)
+        for item in document["entries"]:
+            item["translation"] = "Ceviri"
+        source.write_text(json.dumps(document), encoding="utf-8")
+        self.assertEqual(load_edit(source, rows), ["Ceviri"] * 4)
+        document["entries"][1]["source"] = "Wrong source"
+        source.write_text(json.dumps(document), encoding="utf-8")
+        with self.assertRaisesRegex(RuntimeError, "source/ID/order"):
+            load_edit(source, rows)
+
+    def test_structured_resume_preserves_existing_translation_on_english_echo(self):
+        master = json.loads(self.master.read_text(encoding="utf-8"))
+        document = make_document(master)
+        document["entries"][0]["translation"] = "Onceki ceviri"
+        content = json.dumps(document)
+        source = self.folder / "TR_policenauts_rex_english.json"
+        source.write_text(content, encoding="utf-8")
+        texts = plugin.extract_translatable_texts(content, source)
+        originals = {key: item[0] for key, item in texts.items()}
+        rebuilt = json.loads(plugin.rebuild_content_with_translations(
+            content, originals, {"p00000": "First|line", "p00001": "Diski tak"}
+        ))
+        self.assertEqual(rebuilt["entries"][0]["translation"], "Onceki ceviri")
+        self.assertEqual(rebuilt["entries"][1]["translation"], "Diski tak")
 
 
 if __name__ == "__main__":

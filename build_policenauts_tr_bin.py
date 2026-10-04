@@ -1,5 +1,5 @@
 ﻿#!/usr/bin/env python3
-"""Build a patched Policenauts Disc 1 BIN/CUE from a text-only translation JSON.
+"""Build a patched Policenauts Disc 1 BIN/CUE from ordered translation JSON.
 
 This script intentionally does not ship with game data, disc images, extracted
 script text, or translation dumps. Users must provide their own private metadata
@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 import policenauts_text_format as textfmt
+from make_policenauts_rex_json import FORMAT as REX_FORMAT, KIND_BY_SOURCE
 from policenauts_disc_tools import (
     SECTOR_RAW,
     SECTOR_USER,
@@ -54,10 +55,44 @@ def load_entries(master_path: Path) -> list[dict[str, Any]]:
     return entries
 
 
-def load_edit(edit_path: Path, expected_count: int) -> list[str]:
+def load_edit(edit_path: Path, master_entries: list[dict[str, Any]]) -> list[str]:
     payload = read_json(edit_path)
+    expected_count = len(master_entries)
+    if isinstance(payload, dict) and payload.get("format") == REX_FORMAT:
+        if set(payload) != {"format", "count", "source_language", "target_language", "entries"}:
+            raise RuntimeError("REX JSON root fields are invalid")
+        rows = payload.get("entries")
+        if (not isinstance(rows, list)
+                or type(payload.get("count")) is not int
+                or payload["count"] != expected_count
+                or payload.get("source_language") != "en"
+                or payload.get("target_language") != "tr"):
+            raise RuntimeError("REX JSON header or entry count does not match the master")
+        if len(rows) != expected_count:
+            raise RuntimeError(f"REX JSON has {len(rows)} rows; master has {expected_count}")
+        edits = []
+        missing = []
+        for index, (row, master) in enumerate(zip(rows, master_entries)):
+            if (not isinstance(row, dict)
+                    or set(row) != {"id", "index", "kind", "source", "translation"}
+                    or row.get("id") != f"p{index:05d}"
+                    or type(row.get("index")) is not int
+                    or row["index"] != index
+                    or row.get("kind") != KIND_BY_SOURCE.get(master["source"])
+                    or row.get("source") != master["text_with_breaks"]):
+                raise RuntimeError(f"REX source/ID/order differs from master at index {index}")
+            translation = row.get("translation")
+            if not isinstance(translation, str) or not translation.strip():
+                missing.append(row["id"])
+            else:
+                edits.append(translation)
+        if missing:
+            raise RuntimeError(
+                f"REX JSON has {len(missing)} untranslated entries; first IDs: {missing[:10]}"
+            )
+        return edits
     if not isinstance(payload, list):
-        raise RuntimeError(f"{edit_path} must be a plain JSON list of strings")
+        raise RuntimeError(f"{edit_path} must be a text-only list or {REX_FORMAT} document")
     if len(payload) != expected_count:
         raise RuntimeError(
             f"Text count mismatch: {edit_path} has {len(payload)} strings, "
@@ -328,7 +363,7 @@ def verify_exact_bytes(out_bin: Path, entries: list[dict[str, Any]]) -> list[dic
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Build a patched Policenauts Disc 1 BIN/CUE from text-only JSON"
+        description="Build a patched Policenauts Disc 1 BIN/CUE from a plain array or REX JSON"
     )
     parser.add_argument("--source-bin", type=Path, default=DEFAULT_SOURCE_BIN)
     parser.add_argument("--source-cue", type=Path, default=DEFAULT_SOURCE_CUE)
@@ -354,7 +389,7 @@ def main() -> int:
         raise RuntimeError(f"Missing required files: {missing}")
 
     entries = load_entries(args.master)
-    edits = load_edit(args.edit, len(entries))
+    edits = load_edit(args.edit, entries)
     prepared, stats, cuts = prepare_entries(entries, edits)
     if cuts and not args.allow_truncate:
         write_json(args.cuts, cuts)

@@ -59,11 +59,46 @@ py "$tools\extract_policenauts_audited.py" `
   --report (Join-Path $game 'policenauts_texts_audit_report.json')
 ```
 
-The master stores source offsets and original bytes. **Only translate the text-only `$edit` JSON array.** Do not add, delete, or reorder elements. Re-running the extractor preserves edits from an existing `$master`/`$edit` pair only when original offsets and byte spans still match. Keep a separate backup before large translation revisions.
+The master stores source offsets and original bytes. The `$edit` array is the older direct-edit format; do not add, delete, or reorder its elements. Re-running the extractor preserves edits from an existing `$master`/`$edit` pair only when original offsets and byte spans still match. Keep a separate backup before large translation revisions.
 
-### Optional: Translate With REX
+### Start All Translations Over With REX
 
-Install `rex_plugin/policenauts_disc1.py` in the REX `Eklentiler` folder and select that plugin. Open `$edit` in REX, not `$master`. The plugin reads the English originals from the sibling `$master` while preserving the JSON's plain-array format. In non-overwrite mode REX creates `TR_policenauts_texts_tr_edit_audited.json` beside the input; use that new file with `--edit` in the build command below. Missing AI answers leave the current edit at that index untouched.
+```powershell
+$rexInput = Join-Path $game 'policenauts_rex_english.json'
+py "$tools\make_policenauts_rex_json.py" --master $master --out $rexInput
+```
+
+The generator refuses to overwrite an existing file unless you explicitly pass `--overwrite`. The actual file contains 16,370 entries in this project. Its root `count` equals the array length; each entry has a stable `id` and `index`, a `kind`, an English `source`, and a null `translation`. This is a new English-only starting point, not a copy of the old Turkish edit.
+
+The JSON shape is deliberately explicit:
+
+```json
+{
+  "format": "policenauts-rex-v1",
+  "count": 1,
+  "source_language": "en",
+  "target_language": "tr",
+  "entries": [
+    {
+      "id": "p00000",
+      "index": 0,
+      "kind": "menu",
+      "source": "OK",
+      "translation": null
+    }
+  ]
+}
+```
+
+The example is a valid one-entry illustration; the real file has `count: 16370`. `count` is the total number of entries, not text to translate. `id`/`index` fix the original order, `kind` classifies the text, and `source` is read-only English. Only `translation` is the editable Turkish field. Keep JSON escapes such as `\n` intact; REX handles line breaks for the model.
+
+Install `rex_plugin/policenauts_disc1.py` in the REX `Eklentiler` folder and select that plugin. Open `$rexInput` in REX, not `$master` or the old Turkish `$edit`. The plugin sends only `source` to the model and writes each answer into the matching `translation` field. In non-overwrite mode REX creates `TR_policenauts_rex_english.json` beside the input. To build that result, set:
+
+```powershell
+$edit = Join-Path $game 'TR_policenauts_rex_english.json'
+```
+
+Missing AI answers leave `translation: null`; the builder stops until all entries have nonblank translations. It also checks IDs, order, source text, and entry kind against the master. REX never changes those fields.
 
 The source has real JSON newline characters. The plugin displays each one to the model as `|`, then writes it back as a real newline. `%d` remains a short, separate runtime placeholder. The plugin does not reject an answer just because the model omitted a break or placeholder; however, the disc builder may reject a changed `printf` placeholder in a fixed menu field. Review the cuts report before rebuilding.
 
@@ -96,6 +131,7 @@ Expect successful exit and nonzero verified sector/DPK/timing counts. Open the *
 ## 7. Troubleshooting
 
 - `Source bytes mismatch`: metadata does not match this exact English BIN; do not force it.
-- `Text count mismatch`: your text-only edit list and master are out of sync.
+- `Text count mismatch`: your edit list or structured REX JSON and master are out of sync.
+- `REX JSON has untranslated entries`: finish the reported `translation` fields in REX or manually before building. Do not fill missing entries with the old Turkish file if you want a fresh translation.
 - `Read Error 4097`: confirm the emulator loaded the new CUE, check the verifier, and keep both files in the same directory. A passing verifier narrows the problem but does not replace gameplay testing.
 - Text still English: inspect the audit report, then determine whether it lives in menu ASCII, `.SZ`, `jXS`, movie ASCII, or an image/font asset before patching.
