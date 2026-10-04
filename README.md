@@ -11,7 +11,7 @@ Python tools for auditing text and rebuilding a fixed-layout PlayStation Disc 1 
 - DPK CRC-32/BZIP2, Mode2/Form1 EDC/ECC, source-byte checks, and output-byte checks.
 - A separate verifier for changed sectors, DPK checksums, and movie timing headers.
 
-Text is still written **in place**. The tool does not expand pointers or install a Turkish font. By default, a translation that does not fit causes the build to stop; it is **not** silently truncated. Turkish-specific glyphs are transliterated to ASCII until a font patch exists.
+Text is still written **in place**. The text builder does not expand pointers or map Turkish Unicode characters to font slots. By default, a translation that does not fit causes the build to stop; it is **not** silently truncated. Turkish-specific glyphs are transliterated to ASCII in text builds. The separate font tool creates an editable Turkish-glyph candidate, but it does not yet change text encoding.
 
 ## Files
 
@@ -25,8 +25,10 @@ Text is still written **in place**. The tool does not expand pointers or install
 | `policenauts_disc_tools.py` | ISO, DPK, sector, EDC/ECC helpers. |
 | `policenauts_text_format.py` | Text layout and negated-byte encoding helpers. |
 | `make_policenauts_rex_json.py` | Create a fresh English-source REX JSON with empty translation fields. |
+| `policenauts_font_tools.py` | Export six private 12x12 font atlases, draw Turkish glyph candidates, and patch only approved font cells. |
 | `rex_plugin/policenauts_disc1.py` | REX plugin for the structured JSON (legacy arrays also work). |
 | `docs/USAGE.md` | Complete command-line walkthrough. |
+| `docs/FONT.md` | Font extraction, editable atlas, and safe font-only patch workflow. |
 
 ## Private Inputs
 
