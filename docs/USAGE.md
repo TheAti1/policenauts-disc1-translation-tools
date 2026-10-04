@@ -61,6 +61,12 @@ py "$tools\extract_policenauts_audited.py" `
 
 The master stores source offsets and original bytes. **Only translate the text-only `$edit` JSON array.** Do not add, delete, or reorder elements. Re-running the extractor preserves edits from an existing `$master`/`$edit` pair only when original offsets and byte spans still match. Keep a separate backup before large translation revisions.
 
+### Optional: Translate With REX
+
+Install `rex_plugin/policenauts_disc1.py` in the REX `Eklentiler` folder and select that plugin. Open `$edit` in REX, not `$master`. The plugin reads the English originals from the sibling `$master` while preserving the JSON's plain-array format. In non-overwrite mode REX creates `TR_policenauts_texts_tr_edit_audited.json` beside the input; use that new file with `--edit` in the build command below. Missing AI answers leave the current edit at that index untouched.
+
+The source has real JSON newline characters. The plugin displays each one to the model as `|`, then writes it back as a real newline. `%d` remains a short, separate runtime placeholder. The plugin does not reject an answer just because the model omitted a break or placeholder; however, the disc builder may reject a changed `printf` placeholder in a fixed menu field. Review the cuts report before rebuilding.
+
 ## 5. Build Without Silent Truncation
 
 ```powershell

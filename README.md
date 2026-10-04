@@ -24,6 +24,7 @@ Text is still written **in place**. The tool does not expand pointers or install
 | `verify_policenauts_image.py` | Independently check the patched image. |
 | `policenauts_disc_tools.py` | ISO, DPK, sector, EDC/ECC helpers. |
 | `policenauts_text_format.py` | Text layout and negated-byte encoding helpers. |
+| `rex_plugin/policenauts_disc1.py` | Optional REX plugin for the ordered text-only JSON. |
 | `docs/USAGE.md` | Complete command-line walkthrough. |
 
 ## Private Inputs
@@ -38,6 +39,10 @@ Supply your own source BIN/CUE and private JSON files. The audited extractor tak
 Keep game images, extracted text, translations, and reports outside the repository. `.gitignore` excludes common disc images and JSON dumps, but check `git status` before publishing.
 
 See [the usage guide](docs/USAGE.md) for commands and the overrides format.
+
+## Optional REX Plugin
+
+Copy `rex_plugin/policenauts_disc1.py` into REX's `Eklentiler` directory. Select the audited text-only edit JSON as input and keep the audited master JSON beside it. The plugin reads **English source text from the master**, not the current Turkish values; REX writes a separate `TR_`-prefixed text-only JSON. It shows actual source line breaks as `|` to the model and restores them to JSON newlines on output. Missing optional breaks or placeholders never cause the plugin to discard an answer. The disc builder still checks fixed fields such as menu `printf` placeholders and available byte capacity.
 
 ## Verification and Limits
 
