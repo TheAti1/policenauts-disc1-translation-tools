@@ -72,6 +72,14 @@ def plausible(text: str) -> bool:
     return letters / len(value) >= 0.32 and allowed / len(value) >= 0.88
 
 
+def reviewable_short_span(text: str) -> bool:
+    """Keep short UI labels/fragments for review, not automatic insertion."""
+    value = " ".join(text.split())
+    if not value:
+        return False
+    return any(char.isalpha() for char in value) or len(value) >= 4
+
+
 def scan_game(fp, entries: list[dict]) -> dict:
     known: dict[tuple[str, int], list[tuple[int, int]]] = defaultdict(list)
     for entry in entries:
@@ -84,6 +92,7 @@ def scan_game(fp, entries: list[dict]) -> dict:
         intervals.sort()
     files = iso_nauts_files(fp)
     candidates = []
+    short_review = []
     scanned = 0
     for name in ("GAME1.DPK", "GAME2.DPK"):
         extent, size = files[name]
@@ -112,10 +121,10 @@ def scan_game(fp, entries: list[dict]) -> dict:
                 if prior + 1 < len(intervals) and intervals[prior + 1][0] < end:
                     continue
                 text = game_display_text(raw_text)
-                if unknown or not plausible(text):
+                if unknown:
                     continue
                 user_offset = base + record["data_offset"] + start
-                candidates.append({
+                candidate = {
                     "container": name,
                     "container_entry_index": record["index"],
                     "container_entry_name": record["name"],
@@ -125,8 +134,20 @@ def scan_game(fp, entries: list[dict]) -> dict:
                     "old_bytes_hex": data[start:end].hex(" "),
                     "raw_command_text": raw_text,
                     "text_with_breaks": text,
-                })
-    return {"decoded_spans": scanned, "unmapped_plausible_count": len(candidates), "candidates": candidates}
+                }
+                if plausible(text):
+                    candidates.append(candidate)
+                elif reviewable_short_span(text):
+                    # This bucket includes visible labels as well as script
+                    # identifiers and resource names. No automatic patching.
+                    short_review.append(candidate)
+    return {
+        "decoded_spans": scanned,
+        "unmapped_plausible_count": len(candidates),
+        "unmapped_short_review_count": len(short_review),
+        "candidates": candidates,
+        "short_review": short_review,
+    }
 
 
 def main() -> int:
@@ -142,6 +163,7 @@ def main() -> int:
     print(json.dumps({k: v for k, v in report.items() if k != "candidates"}, indent=2))
     for candidate in report["candidates"][:80]:
         print(candidate["container"], candidate["container_entry_name"], candidate["local_offset"], repr(candidate["text_with_breaks"][:100]))
+    print(f"{len(report['short_review'])} low-confidence spans need manual classification")
     return 0
 
 

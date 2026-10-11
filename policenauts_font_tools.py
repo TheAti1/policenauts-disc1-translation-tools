@@ -31,6 +31,9 @@ FORMAT = "policenauts-font-v1"
 CELL = 12
 CELL_BYTES = 36
 COLUMNS = 64
+RUBI_COUNT = 118
+RUBI_RECORD_BYTES = 10
+RUBI_CELL = 6
 TURKISH = "çÇğĞıİöÖşŞüÜâÂîÎûÛ"
 SLOT_START = 1700
 FONT_RECORDS = {
@@ -121,6 +124,47 @@ def font_atlas(data: bytes, start: int, count: int) -> Image.Image:
     return image
 
 
+def decode_rubi_record(raw: bytes) -> tuple[int, Image.Image]:
+    if len(raw) != RUBI_RECORD_BYTES or raw[0] not in (4, 5, 6):
+        raise ValueError("Invalid RUBI.DAT character record")
+    pixels = bytes((byte >> shift & 3) * 85 for byte in raw[1:] for shift in (6, 4, 2, 0))
+    return raw[0], Image.frombytes("L", (RUBI_CELL, RUBI_CELL), pixels)
+
+
+def extract_rubi(source: Path, out_dir: Path) -> None:
+    if out_dir.exists():
+        raise FileExistsError(f"Refusing to overwrite existing RUBI export: {out_dir}")
+    with source.open("rb") as fp:
+        sector, size = iso_nauts_files(fp)["FONT.DPK"]
+        base = sector * SECTOR_USER
+        record = next(r for r in dpk_records_from_image(fp, base) if r["name"] == "RUBI.DAT")
+        if record["data_offset"] + record["data_size"] > size:
+            raise ValueError("RUBI.DAT exceeds FONT.DPK")
+        raw = read_user_bytes_from_raw(fp, base + record["data_offset"], record["data_size"])
+    if len(raw) != RUBI_COUNT * RUBI_RECORD_BYTES or compute_crc32_bzip2(raw) != record["checksum"]:
+        raise ValueError("Unexpected RUBI.DAT size or checksum")
+    atlas = Image.new("L", (20 * RUBI_CELL, 6 * RUBI_CELL), 0)
+    widths = []
+    for index in range(RUBI_COUNT):
+        offset = index * RUBI_RECORD_BYTES
+        width, glyph = decode_rubi_record(raw[offset:offset + RUBI_RECORD_BYTES])
+        widths.append(width)
+        atlas.paste(glyph, ((index % 20) * RUBI_CELL, (index // 20) * RUBI_CELL))
+    out_dir.mkdir(parents=True)
+    atlas.save(out_dir / "RUBI_DAT_6x6.png")
+    (out_dir / "RUBI_DAT.raw").write_bytes(raw)
+    write_json(out_dir / "manifest.json", {
+        "format": "policenauts-rubi-v1",
+        "source_sha256": sha256(raw),
+        "records": RUBI_COUNT,
+        "record_bytes": RUBI_RECORD_BYTES,
+        "cell_pixels": RUBI_CELL,
+        "widths": widths,
+        "note": "Extraction only. Character-code mapping and safe insertion are not verified.",
+    })
+    print(f"Exported {RUBI_COUNT} small 6x6 glyphs to {out_dir}")
+
+
 def write_json(path: Path, value: dict) -> None:
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
@@ -150,7 +194,7 @@ def extract(source: Path, out_dir: Path) -> None:
         rubi = next(r for r in dpk_records_from_image(fp, sector * SECTOR_USER) if r["name"] == "RUBI.DAT")
         rubi_bytes = read_user_bytes_from_raw(fp, sector * SECTOR_USER + rubi["data_offset"], rubi["data_size"])
         (out_dir / "FONT_DPK__RUBI_DAT.raw").write_bytes(rubi_bytes)
-    manifest["unparsed"] = ["FONT.DPK/RUBI.DAT: preserved as raw; glyph layout not verified"]
+    manifest["separate_font"] = "FONT.DPK/RUBI.DAT: use extract-rubi for read-only 6x6 glyph atlas"
     write_json(out_dir / "manifest.json", manifest)
     print(f"Exported {len(manifest['files'])} editable font atlases to {out_dir}")
 
@@ -170,7 +214,14 @@ def render_turkish(char: str, font: ImageFont.FreeTypeFont) -> Image.Image:
     return image.point(lambda value: min(3, (value + 42) // 85) * 85)
 
 
-def prepare(export_dir: Path, out_dir: Path, font_path: Path, size: int, slot_start: int) -> None:
+def occupied_slots(raw: bytes, start: int, count: int, slots: set[int]) -> list[int]:
+    if any(slot < 0 or slot >= count for slot in slots):
+        raise ValueError("Selected font slot is outside the exported atlas")
+    return sorted(slot for slot in slots if any(raw[start + slot * CELL_BYTES:start + (slot + 1) * CELL_BYTES]))
+
+
+def prepare(export_dir: Path, out_dir: Path, font_path: Path, size: int, slot_start: int,
+            allow_occupied: bool = False) -> None:
     if out_dir.exists():
         raise FileExistsError(f"Refusing to overwrite existing edited fonts: {out_dir}")
     manifest = json.loads((export_dir / "manifest.json").read_text(encoding="utf-8"))
@@ -180,6 +231,16 @@ def prepare(export_dir: Path, out_dir: Path, font_path: Path, size: int, slot_st
         raise FileNotFoundError(font_path)
     font = ImageFont.truetype(str(font_path), size)
     replacement = {slot_start + i: render_turkish(char, font) for i, char in enumerate(TURKISH)}
+    for item in manifest["files"]:
+        raw = (export_dir / item["raw"]).read_bytes()
+        if len(raw) != item["length"] or sha256(raw) != item["sha256"]:
+            raise ValueError(f"Raw export differs from manifest: {item['raw']}")
+        occupied = occupied_slots(raw, item["fixed_start"], item["count"], set(replacement))
+        if occupied and not allow_occupied:
+            raise ValueError(
+                f"Occupied font slots in {item['container']}/{item['name']}: {occupied}. "
+                "Refusing to overwrite existing glyphs; this does not add usable Turkish characters."
+            )
     out_dir.mkdir(parents=True)
     preview = Image.new("RGB", (len(TURKISH) * 58, len(manifest["files"]) * 66), (24, 28, 32))
     preview_draw = ImageDraw.Draw(preview)
@@ -240,7 +301,8 @@ def checked_edits(export_dir: Path, edit_dir: Path, manifest: dict, allowed: set
     return result
 
 
-def patch_bin(source: Path, out_bin: Path, export_dir: Path, edit_dir: Path) -> None:
+def patch_bin(source: Path, out_bin: Path, export_dir: Path, edit_dir: Path,
+              allow_occupied: bool = False) -> None:
     if source.resolve() == out_bin.resolve() or out_bin.exists():
         raise FileExistsError("Output BIN must be a new path, never the source image")
     source_cue = source.with_suffix(".cue")
@@ -269,6 +331,12 @@ def patch_bin(source: Path, out_bin: Path, export_dir: Path, edit_dir: Path) -> 
                 or sha256(data) != item["sha256"] or start != item["fixed_start"]
                 or count != item["count"]):
             raise ValueError(f"Source font differs from export: {item['container']}/{item['name']}")
+        occupied = occupied_slots(data, start, count, set(_changes))
+        if occupied and not allow_occupied:
+            raise ValueError(
+                f"Occupied font slots in {item['container']}/{item['name']}: {occupied}. "
+                "Refusing to overwrite existing glyphs; this does not add usable Turkish characters."
+            )
     shutil.copyfile(source, out_bin)
     touched = set()
     patched = []
@@ -305,24 +373,33 @@ def main() -> int:
     extract_cmd = sub.add_parser("extract", help="Export raw fonts and editable 12x12 PNG atlases")
     extract_cmd.add_argument("--source-bin", type=Path, required=True)
     extract_cmd.add_argument("--out-dir", type=Path, required=True)
+    rubi_cmd = sub.add_parser("extract-rubi", help="Export the separate 6x6 RUBI.DAT font for inspection")
+    rubi_cmd.add_argument("--source-bin", type=Path, required=True)
+    rubi_cmd.add_argument("--out-dir", type=Path, required=True)
     prepare_cmd = sub.add_parser("prepare", help="Draw Turkish glyphs over chosen Japanese cells")
     prepare_cmd.add_argument("--export-dir", type=Path, required=True)
     prepare_cmd.add_argument("--out-dir", type=Path, required=True)
     prepare_cmd.add_argument("--ttf", type=Path, required=True)
     prepare_cmd.add_argument("--size", type=int, default=12)
     prepare_cmd.add_argument("--slot-start", type=int, default=SLOT_START)
+    prepare_cmd.add_argument("--experimental-overwrite-occupied", action="store_true")
     patch_cmd = sub.add_parser("patch-bin", help="Patch only approved font cells in a new BIN")
     patch_cmd.add_argument("--source-bin", type=Path, required=True)
     patch_cmd.add_argument("--out-bin", type=Path, required=True)
     patch_cmd.add_argument("--export-dir", type=Path, required=True)
     patch_cmd.add_argument("--edit-dir", type=Path, required=True)
+    patch_cmd.add_argument("--experimental-overwrite-occupied", action="store_true")
     args = parser.parse_args()
     if args.command == "extract":
         extract(args.source_bin, args.out_dir)
+    elif args.command == "extract-rubi":
+        extract_rubi(args.source_bin, args.out_dir)
     elif args.command == "prepare":
-        prepare(args.export_dir, args.out_dir, args.ttf, args.size, args.slot_start)
+        prepare(args.export_dir, args.out_dir, args.ttf, args.size, args.slot_start,
+                args.experimental_overwrite_occupied)
     else:
-        patch_bin(args.source_bin, args.out_bin, args.export_dir, args.edit_dir)
+        patch_bin(args.source_bin, args.out_bin, args.export_dir, args.edit_dir,
+                  args.experimental_overwrite_occupied)
     return 0
 
 

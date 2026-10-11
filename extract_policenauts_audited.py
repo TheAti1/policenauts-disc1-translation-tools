@@ -125,23 +125,11 @@ def voice_text(chunk: bytes) -> str | None:
 
 
 def voice_candidate(text: str) -> bool:
-    if len(text) < 2 or len(text) > 320:
+    if len(text) < 3 or len(text) > 320:
         return False
-    if not text[0].isalpha() and text[0] not in ('"', "'", "(", "-"):
-        return False
-    if any(c in text for c in "@`|~^<>={}[]\\_"):
-        return False
-    letters = sum(c.isalpha() for c in text)
-    if letters < 2 or letters / len(text) < 0.42:
-        return False
-    if re.search(r"[a-z][A-Z]", text) or re.fullmatch(r"U+(?:\s+U+)*", text):
-        return False
-    if re.fullmatch(r"[A-Z]{2,8}", text):
-        return False
-    words = re.findall(r"[A-Za-z]+(?:'[A-Za-z]+)?", text)
-    if len(words) == 1:
-        return text.endswith((".", "!", "?", ",")) or text in {"Ed", "Dad"}
-    return not all(len(word) <= 2 for word in words)
+    # jXS framing, sector bounds, NUL termination, and voice_text() already
+    # reject non-text bytes. Word-count heuristics lose short spoken fragments.
+    return any(char.isalpha() for char in text)
 
 
 def voice_entries(raw: mmap.mmap, fp, known: set[int], source_name: str) -> tuple[list[dict[str, Any]], int]:

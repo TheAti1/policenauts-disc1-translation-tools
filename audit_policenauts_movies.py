@@ -11,7 +11,7 @@ from pathlib import Path
 from policenauts_disc_tools import SECTOR_USER, _iso_records, iso_nauts_files, read_user_bytes_from_raw
 
 TEXT = re.compile(rb"(?:[\x20-\x7e]|\x80\|){4,}\x00")
-TIMING = re.compile(b"\x00\x38[\x01\x02]\x00\x01\x00")
+TIMING = re.compile(b"\x00\x38[\x01-\x06]\x00\x01\x00")
 
 
 def plausible_subtitle(text: str) -> bool:
@@ -20,12 +20,15 @@ def plausible_subtitle(text: str) -> bool:
         return False
     if any(char in value for char in "`~^<>{}[]\\@_|_$%&+*/"):
         return False
-    words = re.findall(r"[A-Za-z]+(?:'[A-Za-z]+)?", value)
-    if sum(ch.isalpha() for ch in value) / len(value) <= 0.6 or sum(ch.islower() for ch in value) < 4:
+    core = value.rstrip(".!? ")
+    if not core:
+        return False
+    words = re.findall(r"[A-Za-z]+(?:'[A-Za-z]+)?", core)
+    if sum(ch.isalpha() for ch in core) / len(core) <= 0.6 or sum(ch.islower() for ch in core) < 3:
         return False
     if len(words) == 1:
-        return len(value) >= 7 and value.endswith((".", "!", "?", ","))
-    return len(words) >= 2 and (len(value) >= 14 or value.endswith((".", "!", "?", ",")))
+        return len(core) >= 4 and value.endswith((".", "!", "?", ","))
+    return len(words) >= 2 and (len(core) >= 10 or value.endswith((".", "!", "?", ",")))
 
 
 def scan_movies(fp, entries: list[dict]) -> dict:
