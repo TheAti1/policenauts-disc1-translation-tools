@@ -104,13 +104,14 @@ def load_edit(edit_path: Path, master_entries: list[dict[str, Any]]) -> list[str
 
 
 def movie_prefix(entry: dict[str, Any]) -> bytes:
-    raw = bytes.fromhex(str(entry["old_bytes_hex"])).replace(b"\x80|", b"\n")
-    display = str(entry["text_with_breaks"]).encode("ascii", errors="ignore")
-    # Some subtitles have source leading-byte guards consumed by the renderer.
-    # Preserve their occupied width instead of dropping the first visible glyph.
+    raw = bytes.fromhex(str(entry["old_bytes_hex"]))
+    display = str(entry["text_with_breaks"]).replace("\n", "\x80|").encode(
+        "latin1")
+    # Some catalogued subtitles start one byte before the DLOG payload. That
+    # byte may be the final byte of an MDEC frame, so it must stay unchanged.
     core = raw.rstrip(b" ")
     if core.endswith(display) and 0 < len(core) - len(display) <= 3:
-        return b" " * (len(core) - len(display))
+        return core[:len(core) - len(display)]
     return b""
 
 
@@ -374,6 +375,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--report", type=Path, default=DEFAULT_REPORT)
     parser.add_argument("--cuts", type=Path, default=DEFAULT_CUTS)
     parser.add_argument("--allow-truncate", action="store_true", help="Explicitly allow strings to be cut to fit")
+    parser.add_argument(
+        "--allow-ascii-fold", action="store_true",
+        help="Explicitly allow Turkish letters to be replaced by ASCII approximations",
+    )
     return parser
 
 
@@ -390,6 +395,14 @@ def main() -> int:
 
     entries = load_entries(args.master)
     edits = load_edit(args.edit, entries)
+    folded = [index for index, value in enumerate(edits)
+              if textfmt.ascii_safe(value) != textfmt.normalize_newlines(value)]
+    if folded and not args.allow_ascii_fold:
+        raise RuntimeError(
+            f"{len(folded)} translations would lose Unicode characters in the ASCII-only font. "
+            f"First IDs: {[f'p{index:05d}' for index in folded[:10]]}. "
+            "A validated Turkish font/encoding is required; --allow-ascii-fold is lossy."
+        )
     prepared, stats, cuts = prepare_entries(entries, edits)
     if cuts and not args.allow_truncate:
         write_json(args.cuts, cuts)

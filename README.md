@@ -2,6 +2,17 @@
 
 Python tools for auditing text and rebuilding a fixed-layout PlayStation Disc 1 BIN/CUE from a privately owned English-patched image. This repository contains **code only**, not game data or a script dump.
 
+## Disc 1 Studio (GUI + CLI)
+
+Run `py policenauts_studio.py` for a local English-language project editor, or
+`py policenauts_studio_cli.py --help` for extraction, coverage scanning,
+verification, bit-exact source round-trip, and experimental diagnostic builds.
+The project reconstructs 16,533 audited text entries from the user's exact
+English-patched BIN using a text-free offset map, and exports every DPK asset,
+six main font atlases, and the separate RUBI font into a private directory.
+It does not yet discover every visible word or guarantee a playable translated image. See
+[Studio documentation](docs/STUDIO.md) before creating a project or build.
+
 ## What Is Covered
 
 - Existing `GAME1.DPK` / `GAME2.DPK` `.SZ` entries, with negated-byte encoding and in-band control opcodes preserved.

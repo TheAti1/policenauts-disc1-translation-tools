@@ -11,6 +11,11 @@
 # Private extracted data and full text dumps
 *.json
 !examples/*.json
+!data/disc1_english_geometry.json
+
+# Private Studio projects and interrupted outputs
+studio-projects/
+*.partial
 
 # Private DPK files derived from the disc
 iso_extract/**
